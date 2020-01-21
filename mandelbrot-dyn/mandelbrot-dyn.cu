@@ -30,7 +30,7 @@
 	}
 
 /** time spent in device */
-double gpu_time = 0;
+float gpu_time = 0;
 
 /** a useful function to compute the number of threads */
 __host__ __device__ int divup(int x, int y) { return x / y + (x % y ? 1 : 0); }
@@ -246,6 +246,7 @@ __global__ void mandelbrot_block_k
 	x0 += d * blockIdx.x, y0 += d * blockIdx.y;
 	int comm_dwell = border_dwell(w, h, cmin, cmax, x0, y0, d);
 	if(threadIdx.x == 0 && threadIdx.y == 0) {
+	
 		if(comm_dwell != DIFF_DWELL) {
 			// uniform dwell, just fill
 			dim3 bs(BSX, BSY), grid(divup(d, BSX), divup(d, BSY));
@@ -300,23 +301,65 @@ int main(int argc, char **argv) {
 	int *h_dwells, *d_dwells;
 	cucheck(cudaMalloc((void**)&d_dwells, dwell_sz));
 	h_dwells = (int*)malloc(dwell_sz);
+	dim3 bs(BSX, BSY), grid(INIT_SUBDIV, INIT_SUBDIV);
+	const int num_iter = 100;
 
 	// compute the dwells, copy them back
-	double t1 = omp_get_wtime();
-	dim3 bs(BSX, BSY), grid(INIT_SUBDIV, INIT_SUBDIV);
-	mandelbrot_block_k<<<grid, bs>>>
+#define WITH_CUDA_GRAPH 
+#ifdef WITH_CUDA_GRAPH
+	printf("\n    With cuda graph\n");
+	cudaStream_t stream;
+	cudaGraph_t graph;    
+	cudaGraphExec_t cuda_graph_exec;
+    cucheck(cudaStreamCreate(&stream));    
+	cucheck(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));	
+	mandelbrot_block_k<<<grid, bs,0, stream>>>
 		(d_dwells, w, h, complex(-1.5, -1), complex(0.5, 1), 0, 0, W / INIT_SUBDIV, 1);
-	cucheck(cudaThreadSynchronize());
-	double t2 = omp_get_wtime();
-	cucheck(cudaMemcpy(h_dwells, d_dwells, dwell_sz, cudaMemcpyDeviceToHost));
-	gpu_time = t2 - t1;
+	cucheck(cudaStreamEndCapture(stream, &graph));
+	cucheck(cudaGraphInstantiate(&cuda_graph_exec, graph, NULL, NULL, 0));
 	
-	// save the image to PNG file
-	save_image(IMAGE_PATH, h_dwells, w, h);
+	cudaEvent_t start, stop;
+    cucheck(cudaEventCreate(&start));
+    cucheck(cudaEventCreate(&stop));
+	cucheck(cudaEventRecord(start, stream));
+	for(int iter = 0;iter < num_iter; ++iter){
+		cucheck(cudaGraphLaunch(cuda_graph_exec, stream));
+		cucheck(cudaStreamSynchronize(stream));
+	}
+	cucheck(cudaEventRecord(stop, stream));
+    cucheck(cudaEventSynchronize(stop));
+    cucheck(cudaDeviceSynchronize());
+	cucheck(cudaGetLastError());
+	cucheck(cudaGraphExecDestroy(cuda_graph_exec));
+    cucheck(cudaGraphDestroy(graph));
+	cucheck(cudaStreamDestroy(stream));   	
+	cucheck(cudaEventElapsedTime(&gpu_time, start, stop)); 	
+	gpu_time /=static_cast<float>(num_iter);
+#else	
+	cudaEvent_t start, stop;
+    cucheck(cudaEventCreate(&start));
+    cucheck(cudaEventCreate(&stop));
+	cucheck(cudaEventRecord(start, NULL));
+	for(int iter = 0;iter < num_iter; ++iter){
+		mandelbrot_block_k<<<grid, bs>>>
+			(d_dwells, w, h, complex(-1.5, -1), complex(0.5, 1), 0, 0, W / INIT_SUBDIV, 1);
+	}
+	cucheck(cudaEventRecord(stop, NULL));
+	cucheck(cudaEventSynchronize(stop));		
+	cucheck(cudaDeviceSynchronize());
+	cucheck(cudaGetLastError());
+	cucheck(cudaEventElapsedTime(&gpu_time, start, stop)); 	
+	gpu_time /=static_cast<float>(num_iter);
+#endif
 
-	// print performance
-	printf("Mandelbrot set computed in %.3lf s, at %.3lf Mpix/s\n", gpu_time, 
-				 h * w * 1e-6 / gpu_time);
+	//cucheck(cudaMemcpy(h_dwells, d_dwells, dwell_sz, cudaMemcpyDeviceToHost));
+
+	// save the image to PNG file
+	//save_image(IMAGE_PATH, h_dwells, w, h);
+
+	// print performance	
+	printf("Mandelbrot set computed in %.9f ms, at %.9f Mpix/s\n", gpu_time, 
+				 h * w * 1e-3 / gpu_time);
 
 	// free data
 	cudaFree(d_dwells);

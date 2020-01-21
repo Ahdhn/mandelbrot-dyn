@@ -109,8 +109,19 @@ inline __host__ __device__ complex operator/
 								 (a.im * b.re - b.im * a.re) * invabs2);
 }  // operator/
 
-#define MAX_DWELL 256
-#define BS 256
+#define MAX_DWELL 512
+/** block size along */
+#define BSX 64
+#define BSY 4
+/** maximum recursion depth */
+#define MAX_DEPTH 4
+/** region below which do per-pixel */
+#define MIN_SIZE 32
+/** subdivision factor along each axis */
+#define SUBDIV 4
+/** subdivision when launched from host */
+#define INIT_SUBDIV 32
+
 /** computes the dwell for a single pixel */
 __device__ int pixel_dwell
 (int w, int h, complex cmin, complex cmax, int x, int y) {
@@ -167,8 +178,8 @@ void dwell_color(int *r, int *g, int *b, int dwell) {
 }  // dwell_color
 
 /** data size */
-#define H (8 * 1024)
-#define W (8 * 1024)
+#define H (16 * 1024)
+#define W (16 * 1024)
 #define IMAGE_PATH "./mandelbrot.png"
 
 int main(int argc, char **argv) {
@@ -181,10 +192,10 @@ int main(int argc, char **argv) {
 
 	// compute the dwells, copy them back
 	double t1 = omp_get_wtime();
-	dim3 bs(64, 4), grid(divup(w, bs.x), divup(h, bs.y));
+	dim3 bs(BSX, BSY), grid(INIT_SUBDIV, INIT_SUBDIV);	
 	mandelbrot_k<<<grid, bs>>>
 		(d_dwells, w, h, complex(-1.5, -1), complex(0.5, 1));
-	cucheck(cudaThreadSynchronize());
+	cucheck(cudaDeviceSynchronize());
 	double t2 = omp_get_wtime();
 	cucheck(cudaMemcpy(h_dwells, d_dwells, dwell_sz, cudaMemcpyDeviceToHost));
 	gpu_time = t2 - t1;
